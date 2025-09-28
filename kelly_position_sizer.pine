@@ -1,0 +1,186 @@
+//@version=5
+indicator("Kelly Position Sizer (Entry/Stop/Target)", overlay=true, max_bars_back=500, max_labels_count=500)
+
+// ---------------- Inputs (constants only) ----------------
+side        = input.string(defval="Long",  title="Position Side", options=["Long","Short"])
+useClose    = input.bool  (defval=true,    title="Use last close as Entry?")
+entryIn     = input.float (defval=0.0,     title="Entry (manual if not using close)", step=0.0001)
+stopIn      = input.float (defval=0.0,     title="Stop", step=0.0001)
+targetIn    = input.float (defval=0.0,     title="Target", step=0.0001)
+multiplier  = input.float (defval=1.0,     title="Contract/Ratio multiplier (CFD/futures/cert)", step=0.01)
+lotStep     = input.float (defval=1.0,     title="Lot step (1 share, 0.1 lot, etc.)", step=0.1)
+
+bankroll    = input.float (defval=100000.0, title="Bankroll / Equity", step=1.0)
+riskPctInp  = input.float (defval=2.0,      title="Fixed Risk % of Equity", step=0.1)
+
+pWinInp     = input.float (defval=60.0,     title="Win Probability p", step=0.1)
+pIsPct      = input.bool  (defval=true,     title="Interpret p as % (60 = 60%)")
+kellyScale  = input.float (defval=0.50,     title="Fractional Kelly (0–1)", step=0.05)
+capWith2pct = input.bool  (defval=true,     title="Cap Kelly by Fixed Risk % (MIN)")
+
+// ---------------- Resolve ----------------
+var string warn = ""
+float p       = pIsPct ? pWinInp/100.0 : pWinInp
+float riskPct = riskPctInp/100.0
+
+float entry  = useClose ? close : entryIn
+float stop   = stopIn
+float target = targetIn
+
+// Consider inputs valid when stop/target > 0, and if manual entry mode then entry > 0
+bool validPrices = (stop > 0) and (target > 0) and (useClose or entry > 0)
+if not validPrices
+    warn := "Please set Entry/Stop/Target (and Entry if not using close)."
+
+bool isLong  = side == "Long"
+bool isShort = side == "Short"
+
+// Per-unit risk & reward
+float riskPerUnit   = na
+float rewardPerUnit = na
+if validPrices
+    if isLong
+        riskPerUnit   := (entry - stop)
+        rewardPerUnit := (target - entry)
+    else
+        riskPerUnit   := (stop - entry)
+        rewardPerUnit := (entry - target)
+
+riskPerUnit   := riskPerUnit   * multiplier
+rewardPerUnit := rewardPerUnit * multiplier
+
+// R ratio
+float R = na
+if validPrices and riskPerUnit > 0
+    R := rewardPerUnit / riskPerUnit
+
+// Kelly: f* = p - (1-p)/R
+float kellyRaw = na
+if validPrices and not na(R)
+    kellyRaw := p - (1.0 - p)/R
+float kellyRawSafe = math.max(0.0, kellyRaw)
+float kellyUsed    = math.max(0.0, kellyRawSafe * kellyScale)
+
+// Risk cash
+float riskCashFixed = bankroll * riskPct
+float riskCashKelly = bankroll * kellyUsed
+float riskCashUse   = capWith2pct ? math.min(riskCashFixed, riskCashKelly) : riskCashKelly
+
+// Units (risk-based sizing)
+roundDownToStep(float val, float step) =>
+    step <= 0 ? val : math.floor(val/step) * step
+
+float unitsKelly = na
+float unitsFixed = na
+if validPrices and riskPerUnit > 0
+    unitsKelly := roundDownToStep(riskCashUse / riskPerUnit, lotStep)
+    unitsFixed := roundDownToStep(riskCashFixed / riskPerUnit, lotStep)
+
+// Cash loss/gain
+float lossKelly  = unitsKelly * riskPerUnit
+float gainKelly  = unitsKelly * rewardPerUnit
+float lossFixed  = unitsFixed * riskPerUnit
+float gainFixed  = unitsFixed * rewardPerUnit
+
+// ---------------- Plots ----------------
+float entryPlot  = validPrices ? entry  : na
+float stopPlot   = validPrices ? stop   : na
+float targetPlot = validPrices ? target : na
+
+plot(entryPlot,  "Entry",  color=color.new(color.teal,  0), linewidth=2, style=plot.style_linebr)
+plot(stopPlot,   "Stop",   color=color.new(color.red,   0), linewidth=2, style=plot.style_linebr)
+plot(targetPlot, "Target", color=color.new(color.green, 0), linewidth=2, style=plot.style_linebr)
+
+// ---------------- Table ----------------
+int COLS = 4
+int ROWS = 12
+var table t = table.new(position.top_right, COLS, ROWS, border_width=1)
+
+fmt(float v) =>
+    na(v) ? "—" : str.tostring(v, format.mintick)
+fmtPct(float v) =>
+    na(v) ? "—" : str.tostring(v * 100.0, "#.##") + "%"
+
+if barstate.islast
+    table.clear(t)
+
+    int row = 0
+
+    table.merge_cells(t, 0, row, COLS - 1, row)
+    table.cell(t, 0, row, "Kelly Position Sizer", text_color=color.white, bgcolor=color.new(color.black, 0))
+    row += 1
+
+    table.cell(t, 0, row, "Side")
+    table.cell(t, 1, row, side)
+    table.cell(t, 2, row, "Multiplier")
+    table.cell(t, 3, row, fmt(multiplier))
+    row += 1
+
+    table.cell(t, 0, row, "Entry")
+    table.cell(t, 1, row, fmt(entry))
+    table.cell(t, 2, row, "Stop")
+    table.cell(t, 3, row, fmt(stop))
+    row += 1
+
+    table.cell(t, 0, row, "Target")
+    table.cell(t, 1, row, fmt(target))
+    table.cell(t, 2, row, "Per-unit Risk")
+    table.cell(t, 3, row, fmt(riskPerUnit))
+    row += 1
+
+    table.cell(t, 0, row, "R (win/loss)")
+    table.cell(t, 1, row, fmt(R))
+    table.cell(t, 2, row, "p (win %)")
+    table.cell(t, 3, row, fmtPct(p))
+    row += 1
+
+    table.cell(t, 0, row, "Kelly raw")
+    table.cell(t, 1, row, fmtPct(kellyRaw))
+    table.cell(t, 2, row, "Fractional")
+    table.cell(t, 3, row, fmtPct(kellyUsed))
+    row += 1
+
+    table.cell(t, 0, row, "Bankroll")
+    table.cell(t, 1, row, fmt(bankroll))
+    table.cell(t, 2, row, "Fixed Risk %")
+    table.cell(t, 3, row, fmtPct(riskPct))
+    row += 1
+
+    table.cell(t, 0, row, capWith2pct ? "Risk Cash (MIN 2%, Kelly)" : "Risk Cash (Kelly only)")
+    table.cell(t, 1, row, fmt(riskCashUse))
+    table.cell(t, 2, row, "Risk Cash (Fixed)")
+    table.cell(t, 3, row, fmt(riskCashFixed))
+    row += 1
+
+    table.cell(t, 0, row, "Sizing Mode", bgcolor=color.new(color.gray, 70))
+    table.cell(t, 1, row, "Units", bgcolor=color.new(color.gray, 70))
+    table.cell(t, 2, row, "Loss @ Stop", bgcolor=color.new(color.gray, 70))
+    table.cell(t, 3, row, "Gain @ Target", bgcolor=color.new(color.gray, 70))
+    row += 1
+
+    table.cell(t, 0, row, capWith2pct ? "Kelly (capped)" : "Kelly (uncapped)")
+    table.cell(t, 1, row, fmt(unitsKelly))
+    table.cell(t, 2, row, fmt(lossKelly))
+    table.cell(t, 3, row, fmt(gainKelly))
+    row += 1
+
+    table.cell(t, 0, row, "Fixed Risk")
+    table.cell(t, 1, row, fmt(unitsFixed))
+    table.cell(t, 2, row, fmt(lossFixed))
+    table.cell(t, 3, row, fmt(gainFixed))
+
+// ---------------- Warnings ----------------
+string warnSeries = ""
+if not validPrices
+    warnSeries := warn
+else
+    if riskPerUnit <= 0
+        warnSeries := "Per-unit risk must be > 0. Check Entry/Stop/Target."
+    else if not na(R) and R <= 0
+        warnSeries := "R <= 0. Target must exceed Entry for Long (or be below Entry for Short)."
+    else if p < 0 or p > 1
+        warnSeries := "Win probability p must be in [0,1] (or tick 'p as %')."
+
+plotchar(warnSeries != "", title="Warning", char="⚠", location=location.top, color=color.yellow, size=size.tiny)
+if barstate.islast and warnSeries != ""
+    label.new(bar_index, close, text=warnSeries, textcolor=color.yellow, style=label.style_label_left, color=color.new(color.black, 100))
