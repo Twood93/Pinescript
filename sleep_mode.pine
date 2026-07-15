@@ -1,0 +1,66 @@
+//@version=5
+// Sleep Mode — a session-aware indicator that goes dormant ("sleeps") during
+// configured quiet hours. While asleep, signals and alerts are suppressed and
+// the chart background is dimmed so it's obvious the script is idle.
+indicator("Sleep Mode", overlay = true)
+
+// ─── Inputs ──────────────────────────────────────────────────────────────────
+grp = "Sleep Schedule"
+sleepStart = input.session("2200-0000", "Sleep Start (session)", group = grp,
+     tooltip = "Time the script goes to sleep. Uses the chart's timezone.")
+sleepEnd   = input.session("0000-0700", "Sleep End (session)", group = grp,
+     tooltip = "Time the script wakes back up.")
+tz         = input.string("America/New_York", "Timezone", group = grp)
+
+grpSig = "Signals"
+fastLen = input.int(9,  "Fast MA Length", minval = 1, group = grpSig)
+slowLen = input.int(21, "Slow MA Length", minval = 1, group = grpSig)
+
+grpUI = "Appearance"
+dimSleeping = input.bool(true, "Dim chart while sleeping", group = grpUI)
+
+// ─── Sleep detection ─────────────────────────────────────────────────────────
+// A bar is "asleep" if its time falls inside either sleep session window.
+inWindow(sess) => not na(time(timeframe.period, sess, tz))
+isSleeping = inWindow(sleepStart) or inWindow(sleepEnd)
+isAwake    = not isSleeping
+
+justWokeUp   = isAwake and isSleeping[1]
+justFellAsleep = isSleeping and isAwake[1]
+
+// ─── Signals (only computed / fired while awake) ─────────────────────────────
+fastMA = ta.sma(close, fastLen)
+slowMA = ta.sma(close, slowLen)
+
+bullCross = ta.crossover(fastMA, slowMA)
+bearCross = ta.crossunder(fastMA, slowMA)
+
+longSignal  = isAwake and bullCross
+shortSignal = isAwake and bearCross
+
+// ─── Plots ───────────────────────────────────────────────────────────────────
+plot(fastMA, "Fast MA", color = color.new(color.aqua, isSleeping ? 60 : 0))
+plot(slowMA, "Slow MA", color = color.new(color.orange, isSleeping ? 60 : 0))
+
+plotshape(longSignal,  "Long",  shape.triangleup,   location.belowbar,
+     color.new(color.green, 0), size = size.small)
+plotshape(shortSignal, "Short", shape.triangledown, location.abovebar,
+     color.new(color.red, 0),   size = size.small)
+
+bgcolor(dimSleeping and isSleeping ? color.new(color.gray, 90) : na, title = "Sleep tint")
+
+plotshape(justFellAsleep, "Fell asleep", shape.circle, location.top,
+     color.new(color.gray, 30), size = size.tiny, text = "😴")
+plotshape(justWokeUp, "Woke up", shape.circle, location.top,
+     color.new(color.yellow, 30), size = size.tiny, text = "☀️")
+
+// ─── Alerts (suppressed while sleeping) ──────────────────────────────────────
+alertcondition(longSignal,  "Long signal (awake)",  "Sleep Mode: long signal")
+alertcondition(shortSignal, "Short signal (awake)", "Sleep Mode: short signal")
+
+// ─── Status table ────────────────────────────────────────────────────────────
+var table status = table.new(position.top_right, 1, 1, border_width = 1)
+if barstate.islast
+    table.cell(status, 0, 0, isSleeping ? "😴 SLEEPING" : "☀️ AWAKE",
+         text_color = color.white,
+         bgcolor = isSleeping ? color.new(color.gray, 20) : color.new(color.green, 20))
